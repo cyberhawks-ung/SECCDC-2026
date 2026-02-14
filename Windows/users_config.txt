@@ -1,0 +1,235 @@
+# ============================================================================
+# CCDC User Configuration - Consolidated
+# ============================================================================
+#
+# This single file defines ALL authorized users and their access levels.
+# Users can be in multiple sections if they need multiple privilege levels.
+#
+# FORMAT:
+#   [SectionName]
+#   username1
+#   username2
+#
+# RULES:
+#   - Section headers are in [brackets]
+#   - One username per line under each section
+#   - Lines starting with # are comments
+#   - Blank lines are ignored
+#   - Usernames are case-insensitive
+#   - Users can appear in multiple sections
+#
+# ============================================================================
+
+# ----------------------------------------------------------------------------
+# [RegularUsers] - Standard user accounts
+# ----------------------------------------------------------------------------
+# These users will:
+#   - Have passwords reset
+#   - Remain enabled
+#   - NOT be added to any privileged groups
+#   - Be allowed on domain and local systems
+#
+# Use for: Users who need ONLY basic access with no special privileges
+# 
+# NOTE: If a user needs RDP or WinRM access, put them in RemoteDesktopUsers
+#       or RemoteManagementUsers instead! No need to also list here.
+#
+# Use for: Application accounts, service accounts, standard users
+# ----------------------------------------------------------------------------
+[RegularUsers]
+webuser
+appuser
+dbuser
+serviceaccount
+
+
+# ----------------------------------------------------------------------------
+# [Administrators] - Local Administrator access
+# ----------------------------------------------------------------------------
+# These users will:
+#   - Have passwords reset
+#   - Remain enabled
+#   - Be added to domain "Administrators" group
+#   - Be added to local "Administrators" group on all servers
+#
+# Use for: System administrators, users who need server admin access
+# ----------------------------------------------------------------------------
+[Administrators]
+Administrator
+webadmin
+sysadmin
+
+
+# ----------------------------------------------------------------------------
+# [DomainAdmins] - Domain Administrator access (OPTIONAL)
+# ----------------------------------------------------------------------------
+# These users will:
+#   - Have passwords reset
+#   - Remain enabled
+#   - Be added to "Domain Admins" group
+#   - Inherit Administrator privileges
+#
+# WARNING: Domain Admins have full control over the domain!
+# Use sparingly and only for users who absolutely need this access.
+# ----------------------------------------------------------------------------
+[DomainAdmins]
+# Uncomment and add users only if needed
+# domain_admin_user
+
+
+# ----------------------------------------------------------------------------
+# [EnterpriseAdmins] - Enterprise Administrator access (OPTIONAL)
+# ----------------------------------------------------------------------------
+# These users will:
+#   - Have passwords reset
+#   - Remain enabled
+#   - Be added to "Enterprise Admins" group
+#   - Have forest-wide administrative access
+#
+# CRITICAL WARNING: Enterprise Admins control the entire AD forest!
+# This is the highest privilege level. Use VERY sparingly.
+# ----------------------------------------------------------------------------
+[EnterpriseAdmins]
+# Uncomment and add users only if needed
+# enterprise_admin_user
+
+
+# ----------------------------------------------------------------------------
+# [RemoteDesktopUsers] - Remote Desktop access
+# ----------------------------------------------------------------------------
+# These users will:
+#   - Have passwords reset
+#   - Remain enabled (automatically authorized!)
+#   - Be added to "Remote Desktop Users" group (domain)
+#   - Be added to local "Remote Desktop Users" group on all servers
+#   - Be allowed to RDP to servers
+#
+# NOTE: No need to also list in [RegularUsers] - they're already authorized!
+#
+# Use for: Users who need RDP access to servers but not admin rights
+# ----------------------------------------------------------------------------
+[RemoteDesktopUsers]
+# Add users who need RDP access
+# rdp_user1
+# rdp_user2
+
+
+# ----------------------------------------------------------------------------
+# [RemoteManagementUsers] - WinRM/PowerShell Remoting access
+# ----------------------------------------------------------------------------
+# These users will:
+#   - Have passwords reset
+#   - Remain enabled (automatically authorized!)
+#   - Be added to "Remote Management Users" group (domain)
+#   - Be added to local "Remote Management Users" group on all servers
+#   - Be allowed to use PowerShell remoting (WinRM)
+#
+# NOTE: No need to also list in [RegularUsers] - they're already authorized!
+#
+# Use for: Users who need PowerShell remoting but not full admin rights
+# ----------------------------------------------------------------------------
+[RemoteManagementUsers]
+# Add users who need WinRM access
+# winrm_user1
+# winrm_user2
+
+
+# ----------------------------------------------------------------------------
+# [ExcludedUsers] - CRITICAL SAFETY - Completely Hands-Off Accounts
+# ----------------------------------------------------------------------------
+# These users will be COMPLETELY UNTOUCHED by this script:
+#   - Passwords will NOT be reset (keeps original credentials)
+#   - Accounts will NOT be disabled
+#   - Group memberships will NOT be changed (no adds, no removes)
+#   - Completely ignored and left alone
+#
+# CRITICAL: Use this for accounts that have pre-set credentials for:
+#   - Automated scoring systems (judges need exact passwords)
+#   - Competition accounts (specific credentials documented)
+#   - Judge accounts (known credentials for validation)
+#   - Scoring service accounts (automated checks)
+#
+# WARNING: Do NOT list excluded users in any other section above!
+# If they're in [ExcludedUsers], they should ONLY be in [ExcludedUsers].
+# Otherwise their group memberships won't match the config.
+#
+# Use for: Competition accounts, judge accounts, scoring systems,
+#          any account where credentials must remain EXACTLY as-is
+# ----------------------------------------------------------------------------
+[ExcludedUsers]
+# CRITICAL: Uncomment and add competition/scoring accounts here!
+# blueteam
+# ccdc_scoring
+# judge_account
+# automated_checker
+
+
+# ============================================================================
+# IMPORTANT: NO NEED FOR DUPLICATE ENTRIES!
+# ============================================================================
+#
+# If a user is in ANY section above, they are already authorized and will:
+#   - Have their password reset
+#   - Remain enabled
+#   - Be added to the appropriate groups
+#
+# You do NOT need to list them in multiple sections UNLESS they need 
+# multiple types of access.
+#
+# EXAMPLES:
+#
+# Example 1: User needs ONLY RDP access (no admin):
+#   [RemoteDesktopUsers]
+#   rdpuser
+#   
+#   Do NOT also add to [RegularUsers] - it's redundant!
+#
+# Example 2: User needs admin access AND RDP:
+#   [Administrators]
+#   sysadmin
+#   
+#   [RemoteDesktopUsers]
+#   sysadmin
+#
+# Example 3: User needs RDP and WinRM but not admin:
+#   [RemoteDesktopUsers]
+#   supportuser
+#   
+#   [RemoteManagementUsers]
+#   supportuser
+#
+#   Do NOT also add to [RegularUsers] - it's redundant!
+#
+# Example 4: User needs ONLY to exist with a reset password:
+#   [RegularUsers]
+#   appuser
+#
+# ============================================================================
+
+# ============================================================================
+# NOTES
+# ============================================================================
+#
+# 1. Any user NOT listed in RegularUsers, Administrators, DomainAdmins, 
+#    EnterpriseAdmins, RemoteDesktopUsers, or RemoteManagementUsers 
+#    will be DISABLED (unless in ExcludedUsers)
+#
+# 2. EXCLUDED USERS: Users in [ExcludedUsers] are COMPLETELY HANDS-OFF:
+#    - Passwords NOT reset (keeps original credentials)
+#    - Accounts NOT disabled
+#    - Group memberships NOT changed
+#    - Left completely alone for scoring/judges
+#    
+#    WARNING: Don't list excluded users in other sections! They should
+#    ONLY be in [ExcludedUsers]. This prevents group membership mismatches.
+#
+# 3. Domain built-in accounts (Administrator, Guest) are handled specially
+#
+# 4. Local system accounts (Guest, DefaultAccount) will be disabled
+#
+# 5. Changes take effect immediately when script runs
+#
+# 6. All passwords will be reset and displayed on screen (no disk storage)
+#    EXCEPT for excluded users who keep their original passwords
+#
+# ============================================================================
