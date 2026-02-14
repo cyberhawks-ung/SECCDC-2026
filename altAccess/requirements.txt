@@ -1,0 +1,5 @@
+# AltAcctee - no required dependencies for core functionality
+# Python 3.9+ standard library only
+#
+# Optional for improved Windows interactive shell (ConPTY):
+# pywinpty>=1.0.0
