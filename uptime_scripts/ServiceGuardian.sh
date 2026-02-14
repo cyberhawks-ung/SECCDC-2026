@@ -12,8 +12,6 @@
 #   ./ServiceGuardian.sh status
 #
 
-set -e
-
 # Configuration
 GUARDIAN_DIR="/opt/serviceguardian"
 BACKUP_DIR="$GUARDIAN_DIR/backups"
@@ -63,8 +61,8 @@ init_dirs() {
 # Check if service exists
 service_exists() {
     local service="$1"
-    systemctl list-unit-files --type=service | grep -q "^${service}.service" || \
-    systemctl list-units --type=service --all | grep -q "${service}.service"
+    systemctl list-unit-files --type=service 2>/dev/null | grep -q "^${service}.service" || \
+    systemctl list-units --type=service --all 2>/dev/null | grep -q "${service}.service"
 }
 
 # Get service binary path
@@ -79,7 +77,7 @@ get_service_path() {
         # Try from service file directly
         local service_file=$(systemctl show "$service" -p FragmentPath 2>/dev/null | cut -d= -f2)
         if [ -f "$service_file" ]; then
-            exec_path=$(grep -oP '(?<=ExecStart=)[^\s]+' "$service_file" | head -1)
+            exec_path=$(grep -oP '(?<=ExecStart=)[^\s]+' "$service_file" 2>/dev/null | head -1)
         fi
     fi
     
@@ -131,12 +129,11 @@ EOF
         if [[ "$exec_dir" != "/usr/bin" && "$exec_dir" != "/usr/sbin" && "$exec_dir" != "/bin" && "$exec_dir" != "/sbin" ]]; then
             log "INFO" "$service" "Backing up directory: $exec_dir"
             cp -r "$exec_dir" "$backup_path/service_files" 2>/dev/null || true
-        else {
+        else
             # Just backup the binary
             mkdir -p "$backup_path/service_files"
             cp "$exec_path" "$backup_path/service_files/" 2>/dev/null || true
             log "INFO" "$service" "Backed up binary: $exec_path"
-        }
         fi
     fi
     
@@ -452,8 +449,10 @@ show_status() {
     echo -e "\n${CYAN}=== ServiceGuardian Status ===${NC}\n"
     
     echo -e "${CYAN}Protected Services:${NC}"
-    for config_file in "$CONFIG_DIR"/*.conf 2>/dev/null; do
+    local found=0
+    for config_file in "$CONFIG_DIR"/*.conf; do
         [ -f "$config_file" ] || continue
+        found=1
         
         local service=$(basename "$config_file" .conf)
         local status=$(systemctl is-active "$service" 2>/dev/null || echo "unknown")
@@ -464,17 +463,33 @@ show_status() {
         esac
     done
     
+    if [ $found -eq 0 ]; then
+        echo -e "  ${YELLOW}No services protected${NC}"
+    fi
+    
     echo ""
     echo -e "${CYAN}Cron Status:${NC}"
-    crontab -l 2>/dev/null | grep -q "serviceguardian" && echo -e "  ${GREEN}●${NC} Cron job active" || echo -e "  ${RED}●${NC} No cron job"
+    if crontab -l 2>/dev/null | grep -q "serviceguardian"; then
+        echo -e "  ${GREEN}●${NC} Cron job active"
+    else
+        echo -e "  ${RED}●${NC} No cron job"
+    fi
     
     echo ""
     echo -e "${CYAN}Timer Status:${NC}"
-    systemctl is-active --quiet serviceguardian.timer 2>/dev/null && echo -e "  ${GREEN}●${NC} Systemd timer active" || echo -e "  ${YELLOW}●${NC} Systemd timer not active"
+    if systemctl is-active --quiet serviceguardian.timer 2>/dev/null; then
+        echo -e "  ${GREEN}●${NC} Systemd timer active"
+    else
+        echo -e "  ${YELLOW}●${NC} Systemd timer not active"
+    fi
     
     echo ""
     echo -e "${CYAN}Recent Logs:${NC}"
-    tail -5 "$LOG_DIR"/*.log 2>/dev/null | head -20 || echo "  No logs yet"
+    if ls "$LOG_DIR"/*.log 1>/dev/null 2>&1; then
+        tail -5 "$LOG_DIR"/*.log 2>/dev/null | head -20
+    else
+        echo "  No logs yet"
+    fi
 }
 
 # Main
