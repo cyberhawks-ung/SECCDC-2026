@@ -79,11 +79,13 @@ param(
 # Global Configuration
 # ============================================================================
 $script:StartTime = Get-Date
-$script:ExecutionLog = @()
-$script:PersistenceActions = @()
-$script:PIIFiles = @()
-$script:Errors = @()
-$script:Warnings = @()
+# Use ArrayList instead of @() to avoid op_Addition errors when appending
+# from nested functions in $script: scope (System.Object[] lacks op_Addition)
+$script:ExecutionLog = [System.Collections.ArrayList]::new()
+$script:PersistenceActions = [System.Collections.ArrayList]::new()
+$script:PIIFiles = [System.Collections.ArrayList]::new()
+$script:Errors = [System.Collections.ArrayList]::new()
+$script:Warnings = [System.Collections.ArrayList]::new()
 $script:Statistics = @{
     ServersProcessed = 0
     RolesDetected = 0
@@ -103,11 +105,13 @@ $script:Statistics = @{
 # Role detection signatures with service persistence mapping
 $script:RoleSignatures = @{
     DomainController = @{
-        Services = @('NTDS', 'DNS', 'Netlogon', 'W32Time', 'DFSR', 'Dfs', 'IsmServ', 'ADWS', 'kdc')
+        Services = @('NTDS', 'DNS', 'Netlogon', 'W32Time', 'DFSR', 'IsmServ', 'ADWS', 'kdc')
         MandatoryService = 'NTDS'  # Must be running to confirm this role
-        Ports = @(53, 88, 123, 135, 139, 389, 445, 464, 636, 3268, 3269, '49152-65535')
+        # 137/138 = NetBIOS Name/Datagram (Netlogon + DFS depend on these)
+        # 593 = RPC over HTTP, 9389 = AD Web Services
+        Ports = @(53, 88, 123, 135, 137, 138, 139, 389, 445, 464, 593, 636, 3268, 3269, 9389, '49152-65535')
         Description = "Active Directory Domain Controller"
-        CriticalServices = @('NTDS', 'DNS', 'Netlogon', 'W32Time', 'kdc', 'DFSR', 'Dfs', 'ADWS', 'LanmanWorkstation', 'LanmanServer')
+        CriticalServices = @('NTDS', 'DNS', 'Netlogon', 'W32Time', 'kdc', 'DFSR', 'ADWS', 'LanmanWorkstation', 'LanmanServer')
     }
     MSSQL = @{
         Services = @('MSSQLSERVER', 'SQLSERVERAGENT', 'SQLBrowser')
@@ -195,7 +199,7 @@ function Write-Log {
         Level = $Level
         Message = $Message
     }
-    $script:ExecutionLog += $logEntry
+    [void]$script:ExecutionLog.Add($logEntry)
     
     Write-Host "[$timestamp] " -NoNewline -ForegroundColor DarkGray
     
@@ -204,15 +208,15 @@ function Write-Log {
         'SUCCESS'  { Write-Host "[SUCCESS]  " -NoNewline -ForegroundColor Green }
         'WARNING'  { 
             Write-Host "[WARNING]  " -NoNewline -ForegroundColor Yellow
-            $script:Warnings += $logEntry
+            [void]$script:Warnings.Add($logEntry)
         }
         'ERROR'    { 
             Write-Host "[ERROR]    " -NoNewline -ForegroundColor Red
-            $script:Errors += $logEntry
+            [void]$script:Errors.Add($logEntry)
         }
         'CRITICAL' { 
             Write-Host "[CRITICAL] " -NoNewline -ForegroundColor White -BackgroundColor Red
-            $script:Errors += $logEntry
+            [void]$script:Errors.Add($logEntry)
         }
         'CHANGE'   { Write-Host "[CHANGE]   " -NoNewline -ForegroundColor Magenta }
         'DRYRUN'   { Write-Host "[DRY RUN]  " -NoNewline -ForegroundColor Yellow -BackgroundColor DarkBlue }
@@ -258,14 +262,24 @@ function Detect-ServerRoles {
         } -ErrorAction Stop
         
         $serviceNames = $services.Name
+        Write-Log "Found $($serviceNames.Count) running services on $ComputerName" -Level INFO
+        
+        # Log key AD services specifically for diagnostics
+        $adServices = @('NTDS', 'DNS', 'Netlogon', 'W32Time', 'DFSR', 'Dfs', 'kdc', 'ADWS', 'IsmServ', 'LanmanWorkstation', 'LanmanServer')
+        $foundAD = $adServices | Where-Object { $serviceNames -contains $_ }
+        if ($foundAD.Count -gt 0) {
+            Write-Log "AD-related services running: $($foundAD -join ', ')" -Level INFO
+        }
         
         foreach ($role in $script:RoleSignatures.Keys) {
             $signature = $script:RoleSignatures[$role]
             $matchedServices = 0
+            $matchedNames = @()
             
             foreach ($requiredService in $signature.Services) {
                 if ($serviceNames -contains $requiredService) {
                     $matchedServices++
+                    $matchedNames += $requiredService
                 }
             }
             
@@ -274,9 +288,12 @@ function Detect-ServerRoles {
                 # This prevents false positives (e.g. Win11 with LanmanServer != DC)
                 if ($signature.MandatoryService) {
                     if ($serviceNames -notcontains $signature.MandatoryService) {
+                        Write-Log "Role $role skipped: mandatory service '$($signature.MandatoryService)' not running (matched: $($matchedNames -join ', '))" -Level INFO
                         continue  # Skip this role - mandatory service not found
                     }
                 }
+                
+                Write-Log "Role $role CONFIRMED: matched services ($matchedServices): $($matchedNames -join ', ')" -Level ROLE
                 
                 $detectedRoles += [PSCustomObject]@{
                     Role = $role
@@ -291,11 +308,89 @@ function Detect-ServerRoles {
             }
         }
         
+        if ($detectedRoles.Count -eq 0) {
+            Write-Log "WARNING: No roles detected on $ComputerName - firewall will use safety net (listening ports only)" -Level WARNING
+        }
+        
         return $detectedRoles
         
     } catch {
         Write-Log "Failed to detect roles on ${ComputerName}: $_" -Level ERROR
         return @()
+    }
+}
+
+# ============================================================================
+# AD Core Services Verification (end-of-script safety check)
+# ============================================================================
+# Ensures critical AD services and their dependencies are running.
+# Uses actual dependency chain from the DC:
+#   LanmanWorkstation depends on: NSI, MRxSmb20, Bowser
+#   LanmanServer depends on: SamSS, Srv2
+#   Netlogon depends on: LanmanServer, LanmanWorkstation
+# ============================================================================
+
+function Verify-ADServices {
+    param(
+        [string]$ComputerName
+    )
+    
+    Write-SubSection "Verifying AD Core Services on $ComputerName"
+    
+    try {
+        $scriptBlock = {
+            $results = @{ Started = 0; AlreadyRunning = 0; Failed = @() }
+            
+            # Start in dependency order - dependencies first, then dependents
+            $serviceOrder = @(
+                # Tier 0: Base drivers/services (dependencies of LanmanWorkstation/LanmanServer)
+                'NSI', 'Bowser', 'MRxSmb20', 'SamSS', 'Srv2',
+                # Tier 1: SMB services (Netlogon depends on both)
+                'LanmanWorkstation', 'LanmanServer',
+                # Tier 2: AD services
+                'Netlogon', 'NTDS', 'DNS', 'kdc', 'W32Time', 'DFSR', 'ADWS'
+            )
+            
+            foreach ($svcName in $serviceOrder) {
+                try {
+                    $svc = Get-Service -Name $svcName -ErrorAction SilentlyContinue
+                    if ($null -eq $svc) { continue }  # Service doesn't exist on this machine
+                    
+                    if ($svc.Status -eq 'Running') {
+                        $results.AlreadyRunning++
+                    } else {
+                        # Ensure startup type is not Disabled before trying to start
+                        Set-Service -Name $svcName -StartupType Automatic -ErrorAction SilentlyContinue
+                        Start-Service -Name $svcName -ErrorAction Stop
+                        Start-Sleep -Milliseconds 300
+                        $svc.Refresh()
+                        if ($svc.Status -eq 'Running') {
+                            $results.Started++
+                        } else {
+                            $results.Failed += "$svcName (Status: $($svc.Status))"
+                        }
+                    }
+                } catch {
+                    $results.Failed += "$svcName (Error: $_)"
+                }
+            }
+            
+            return $results
+        }
+        
+        $result = Invoke-Command -ComputerName $ComputerName -ScriptBlock $scriptBlock -ErrorAction Stop
+        
+        if ($result.Failed.Count -eq 0) {
+            Write-Log "AD services verified: $($result.AlreadyRunning) running, $($result.Started) restarted" -Level SUCCESS
+        } else {
+            Write-Log "AD services: $($result.AlreadyRunning) running, $($result.Started) restarted, $($result.Failed.Count) FAILED" -Level WARNING
+            foreach ($fail in $result.Failed) {
+                Write-Log "  FAILED: $fail" -Level ERROR
+            }
+        }
+        
+    } catch {
+        Write-Log "AD service verification failed on ${ComputerName}: $_" -Level ERROR
     }
 }
 
@@ -432,12 +527,12 @@ foreach ($svc in $services) {
                 
                 $script:Statistics.PersistenceTasksCreated += $result.TasksCreated
                 
-                $script:PersistenceActions += [PSCustomObject]@{
+                [void]$script:PersistenceActions.Add([PSCustomObject]@{
                     Server = $ComputerName
                     Services = $criticalServices -join ', '
                     TasksCreated = $result.TasksCreated
                     Timestamp = Get-Date
-                }
+                })
             }
         }
         
@@ -465,6 +560,24 @@ function Configure-RoleBasedFirewall {
         }
         $requiredPorts = $requiredPorts | Select-Object -Unique | Sort-Object
         
+        # CRITICAL SAFETY NET: Capture all currently-listening TCP ports BEFORE applying firewall
+        # This ensures we NEVER block a port that has a running service, even if role detection
+        # missed it. This prevents breaking Netlogon, DFS, LanmanWorkstation, etc.
+        try {
+            $listeningPorts = Invoke-Command -ComputerName $ComputerName -ScriptBlock {
+                @(Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue |
+                    Select-Object -ExpandProperty LocalPort -Unique |
+                    Where-Object { $_ -gt 0 } | Sort-Object)
+            } -ErrorAction Stop
+            
+            if ($listeningPorts -and $listeningPorts.Count -gt 0) {
+                Write-Log "Safety net: preserving $($listeningPorts.Count) currently-listening ports" -Level INFO
+                $requiredPorts = @($requiredPorts) + @($listeningPorts) | ForEach-Object { [string]$_ } | Select-Object -Unique
+            }
+        } catch {
+            Write-Log "Could not capture listening ports (proceeding with role-based only): $_" -Level WARNING
+        }
+        
         # Convert all ports to strings for WinRM serialization safety
         # (Invoke-Command deserializes [int] as Deserialized.System.Int32 which fails -is [int])
         [string[]]$portStrings = $requiredPorts | ForEach-Object { [string]$_ }
@@ -484,7 +597,8 @@ function Configure-RoleBasedFirewall {
             }
             
             # Ports that need UDP rules in addition to TCP
-            $udpPorts = @(53, 67, 68, 88, 123, 389, 464, 500, 4500)
+            # 137/138 = NetBIOS (critical for Netlogon/DFS), 636 = LDAPS
+            $udpPorts = @(53, 67, 68, 88, 123, 137, 138, 389, 464, 500, 636, 4500)
             
             try {
                 if (-not $dryRun) {
@@ -580,13 +694,15 @@ function Harden-Services {
     # SAFETY: Services that must NEVER be disabled regardless of role detection
     # These are infrastructure-critical and breaking them can take down the domain
     # Also protects dependencies for ServiceGuardian (Winmgmt, Schedule)
+    # Includes Netlogon dependency chain: LanmanWorkstation depends on Bowser/MRxSmb20/NSI
     $neverDisable = @(
-        'NTDS', 'DNS', 'Netlogon', 'W32Time', 'DFSR', 'Dfs', 'ADWS', 'kdc', 'IsmServ',
+        'NTDS', 'DNS', 'Netlogon', 'W32Time', 'DFSR', 'ADWS', 'kdc', 'IsmServ',
         'LanmanWorkstation', 'LanmanServer', 'TermService', 'WinRM', 'WinDefend',
         'RpcSs', 'RpcEptMapper', 'DcomLaunch', 'LSM', 'SamSs', 'EventLog',
         'gpsvc', 'CryptSvc', 'Dhcp', 'Dnscache', 'nlasvc', 'BFE', 'mpssvc',
         'MSSQLSERVER', 'W3SVC', 'WAS', 'DHCPServer', 'vmms',
-        'Winmgmt', 'Schedule'
+        'Winmgmt', 'Schedule',
+        'Bowser', 'MRxSmb20', 'NSI', 'Srv2'
     )
     
     $requiredServices = @()
@@ -673,7 +789,9 @@ function Harden-Registry {
         @{ Path = 'HKLM:\SYSTEM\CurrentControlSet\Services\LanmanWorkstation\Parameters'; Name = 'RequireSecuritySignature'; Value = 1; Type = 'DWord' },
         @{ Path = 'HKLM:\SYSTEM\CurrentControlSet\Services\LDAP'; Name = 'LDAPClientIntegrity'; Value = 2; Type = 'DWord' },
         @{ Path = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\DNSClient'; Name = 'EnableMulticast'; Value = 0; Type = 'DWord' },
-        @{ Path = 'HKLM:\SYSTEM\CurrentControlSet\Services\NetBT\Parameters'; Name = 'NodeType'; Value = 2; Type = 'DWord' },
+        # NodeType 8 = H-node (WINS first, then broadcast fallback)
+        # NEVER use NodeType 2 (P-node/WINS-only) - breaks Netlogon/DFS without WINS server
+        @{ Path = 'HKLM:\SYSTEM\CurrentControlSet\Services\NetBT\Parameters'; Name = 'NodeType'; Value = 8; Type = 'DWord' },
         @{ Path = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows Defender\Real-Time Protection'; Name = 'DisableRealtimeMonitoring'; Value = 0; Type = 'DWord' },
         @{ Path = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU'; Name = 'NoAutoUpdate'; Value = 0; Type = 'DWord' },
         @{ Path = 'HKLM:\SYSTEM\CurrentControlSet\Control\Lsa'; Name = 'RestrictAnonymousSAM'; Value = 1; Type = 'DWord' },
@@ -918,6 +1036,12 @@ function Grant-RemoteLogonRights {
                 }
                 
                 if ($modified -and -not $dryRun) {
+                    # CRITICAL: Strip [Service General Setting] section from template before reimport
+                    # secedit /export includes service startup types. Re-importing can change
+                    # service startup types (e.g. set Netlogon/LanmanWorkstation to Disabled)
+                    # We only want to import [Privilege Rights] changes, not service config.
+                    $content = $content -replace '(?ms)\[Service General Setting\].*?(?=\[|$)', ''
+                    
                     $content | Out-File -FilePath $importFile -Encoding Unicode -Force
                     
                     # Remove stale db if exists
@@ -1456,11 +1580,11 @@ function Scan-PIIFiles {
         if ($piiFiles.Count -gt 0) {
             Write-Log "Found $($piiFiles.Count) potential PII files" -Level PII
             $script:Statistics.PIIFilesFound += $piiFiles.Count
-            $script:PIIFiles += [PSCustomObject]@{
+            [void]$script:PIIFiles.Add([PSCustomObject]@{
                 Server = $ComputerName
                 Files = $piiFiles
                 Count = $piiFiles.Count
-            }
+            })
         } else {
             Write-Log "No PII files found" -Level SUCCESS
         }
@@ -1858,6 +1982,9 @@ foreach ($serverName in $targetComputers) {
         Write-Log "No specific roles detected (generic Windows server)" -Level INFO
     }
     
+    # Determine if this is a DC (for end-of-hardening service check)
+    $isDC = $detectedRoles | Where-Object { $_.Role -eq 'DomainController' }
+    
     # System Enumeration
     if (-not $SkipEnumeration) {
         Perform-SystemEnumeration -ComputerName $serverName
@@ -1916,6 +2043,12 @@ foreach ($serverName in $targetComputers) {
     # Service Persistence (runs last)
     if (-not $SkipPersistence) {
         Create-ServicePersistence -ComputerName $serverName -Roles $detectedRoles
+    }
+    
+    # FINAL CHECK: On DCs, verify AD core services and dependencies are running
+    # Uses correct dependency order from actual service configuration
+    if ($isDC -and -not $DryRun) {
+        Verify-ADServices -ComputerName $serverName
     }
     
     Write-Log "Completed hardening for $serverName" -Level SUCCESS
